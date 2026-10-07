@@ -242,6 +242,18 @@ static int fmcs_probe(struct platform_device *pdev)
 
 	dev_info(dev, "Mapped AN7581 MMIO: SPI=%px, NFI=%px\n", priv->spi_base, priv->nfi_base);
 
+	/* Enable SPI CS1 pad/pinmux on AN7581 (Discovered from stock vmlinux probe at 0x576ae8) */
+	{
+		void __iomem *pad_base = ioremap(0x1FA20218, 4);
+		if (pad_base) {
+			u32 val = readl(pad_base);
+			dev_info(dev, "AN7581 SPI CS1 pad reg (0x1FA20218): before=0x%08x\n", val);
+			writel(val | 1, pad_base);
+			dev_info(dev, "AN7581 SPI CS1 pad reg (0x1FA20218): after=0x%08x\n", readl(pad_base));
+			iounmap(pad_base);
+		}
+	}
+
 	/* Parse GPIO and Interrupts from Device Tree */
 	priv->gpiod_int = devm_gpiod_get_optional(dev, "fpga-spi-int", GPIOD_IN);
 	priv->gpiod_clk = devm_gpiod_get_optional(dev, "fpga-clk", GPIOD_OUT_LOW);
