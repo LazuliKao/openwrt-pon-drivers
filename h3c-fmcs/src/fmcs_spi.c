@@ -91,12 +91,6 @@ static int fmcs_raw_spi_write(struct fmcs_priv *priv, const u8 *buf, u32 len)
 	if (!priv->spi_base || !priv->nfi_base)
 		return -ENODEV;
 
-	/* Wait for NFI controller to become idle */
-	while ((readl(priv->nfi_base + REG_NFI_BUSY) & 0xf) && --timeout)
-		cpu_relax();
-	if (!timeout)
-		return -EBUSY;
-
 	/* Enable Manual Mode */
 	writel(9, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
 	writel(1, priv->spi_base + REG_SPI_CTRL_MANUAL_EN);
@@ -130,12 +124,6 @@ static int fmcs_raw_spi_read(struct fmcs_priv *priv, const u8 *send_buf, u32 sen
 
 	if (!priv->spi_base || !priv->nfi_base)
 		return -ENODEV;
-
-	/* Wait for NFI controller to become idle */
-	while ((readl(priv->nfi_base + REG_NFI_BUSY) & 0xf) && --timeout)
-		cpu_relax();
-	if (!timeout)
-		return -EBUSY;
 
 	/* Enable Manual Mode */
 	writel(9, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
