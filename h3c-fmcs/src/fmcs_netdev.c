@@ -10,16 +10,25 @@
 
 static netdev_tx_t fmcs_omci_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct fmcs_priv *priv = netdev_priv(dev);
+	struct fmcs_priv *priv = *(struct fmcs_priv **)netdev_priv(dev);
+	struct net_device *dst_dev;
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += skb->len;
 
-	/*
-	 * In stock architecture, OMCI frames are either pushed through SPI
-	 * or injected into the HSGMII stream. For userspace daemon (momci),
-	 * transmitting on molt_omci writes the packet to the FPGA.
-	 */
+	dst_dev = dev_get_by_name(&init_net, "lan1");
+	if (!dst_dev)
+		dst_dev = dev_get_by_name(&init_net, "eth1");
+
+	if (dst_dev) {
+		struct sk_buff *nskb = skb_copy(skb, GFP_ATOMIC);
+		if (nskb) {
+			nskb->dev = dst_dev;
+			dev_queue_xmit(nskb);
+		}
+		dev_put(dst_dev);
+	}
+
 	(void)priv;
 	dev_kfree_skb_any(skb);
 	return NETDEV_TX_OK;
