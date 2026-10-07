@@ -99,7 +99,7 @@ static int fmcs_raw_spi_write(struct fmcs_priv *priv, const u8 *buf, u32 len)
 	/* Enable Manual Mode */
 	writel(9, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
 	writel(1, priv->spi_base + REG_SPI_CTRL_MANUAL_EN);
-	writel(1, priv->spi_base + REG_SPI_CTRL_DUMMY);
+	writel(0, priv->spi_base + REG_SPI_CTRL_DUMMY);
 
 	/* Switch to CS1 (FPGA) on SPI controller */
 	writel(1, priv->spi_base + REG_SPI_CS_SEL);
@@ -140,7 +140,7 @@ static int fmcs_raw_spi_read(struct fmcs_priv *priv, const u8 *send_buf, u32 sen
 	/* Enable Manual Mode */
 	writel(9, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
 	writel(1, priv->spi_base + REG_SPI_CTRL_MANUAL_EN);
-	writel(1, priv->spi_base + REG_SPI_CTRL_DUMMY);
+	writel(0, priv->spi_base + REG_SPI_CTRL_DUMMY);
 
 	/* Switch to CS1 (FPGA) on SPI controller */
 	writel(1, priv->spi_base + REG_SPI_CS_SEL);
