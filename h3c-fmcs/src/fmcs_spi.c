@@ -170,12 +170,15 @@ static int fmcs_raw_spi_read(struct fmcs_priv *priv, const u8 *send_buf, u32 sen
 int fmcs_spi_write_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 val)
 {
 	u8 tx_buf[9];
+	int ret;
 
 	tx_buf[0] = FMCS_SPI_CMD_WRITE_REG;
 	*(__be32 *)&tx_buf[1] = cpu_to_be32(addr);
 	*(__be32 *)&tx_buf[5] = cpu_to_be32(val);
 
-	return fmcs_raw_spi_write(priv, tx_buf, sizeof(tx_buf));
+	ret = fmcs_raw_spi_write(priv, tx_buf, sizeof(tx_buf));
+	pr_info("fmcs: write_fpga_reg addr=0x%08x val=0x%08x -> ret=%d\n", addr, val, ret);
+	return ret;
 }
 
 int fmcs_spi_read_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
@@ -183,7 +186,7 @@ int fmcs_spi_read_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
 	u8 tx_req[5];
 	u8 rx_cmd = FMCS_SPI_CMD_READ_RESP;
 	u8 rx_resp[4] = { 0 };
-	int ret;
+	int ret, ret2;
 
 	if (!val)
 		return -EINVAL;
@@ -193,18 +196,24 @@ int fmcs_spi_read_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
 	*(__be32 *)&tx_req[1] = cpu_to_be32(addr);
 
 	ret = fmcs_raw_spi_write(priv, tx_req, sizeof(tx_req));
-	if (ret)
+	if (ret) {
+		pr_err("fmcs: read_fpga_reg phase1 failed: %d\n", ret);
 		return ret;
+	}
 
 	/* FPGA internal processing delay (stock: 50us) */
 	udelay(50);
 
 	/* Phase 2: Read 4 bytes of register data with command 0x50 */
-	ret = fmcs_raw_spi_read(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
-	if (ret)
-		return ret;
+	ret2 = fmcs_raw_spi_read(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
+	if (ret2) {
+		pr_err("fmcs: read_fpga_reg phase2 failed: %d\n", ret2);
+		return ret2;
+	}
 
 	*val = be32_to_cpup((__be32 *)rx_resp);
+	pr_info("fmcs: read_fpga_reg addr=0x%08x -> val=0x%08x (raw rx: %02x %02x %02x %02x)\n",
+		addr, *val, rx_resp[0], rx_resp[1], rx_resp[2], rx_resp[3]);
 	return 0;
 }
 
