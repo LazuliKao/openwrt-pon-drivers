@@ -15,6 +15,8 @@
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 #include <linux/io.h>
+#include <linux/of.h>
+#include <linux/mod_devicetable.h>
 #include "fmcs.h"
 
 static struct fmcs_priv *g_fmcs_priv;
