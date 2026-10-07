@@ -88,15 +88,21 @@ static int fmcs_raw_spi_write(struct fmcs_priv *priv, const u8 *buf, u32 len)
 	int timeout = 10000;
 	int ret;
 
-	if (!priv->spi_base || !priv->nfi_base)
+	if (!priv->spi_base)
 		return -ENODEV;
+
+	/* Clear interrupt, wait for MACMUX ready */
+	writel(0, priv->spi_base + REG_SPI_INT_CLEAR);
+	while (readl(priv->spi_base + REG_SPI_MACMUX_STATUS) && --timeout)
+		cpu_relax();
 
 	/* Enable Manual Mode */
 	writel(9, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
 	writel(1, priv->spi_base + REG_SPI_CTRL_MANUAL_EN);
+	writel(1, priv->spi_base + REG_SPI_CTRL_DUMMY);
 
-	/* Switch NFI to CS1 (FPGA) */
-	writel(1, priv->nfi_base + REG_NFI_CS_SEL);
+	/* Switch to CS1 (FPGA) on SPI controller */
+	writel(1, priv->spi_base + REG_SPI_CS_SEL);
 
 	/* Assert CS (Active Low) */
 	ret = an7581_spi_op_write(priv, SPI_OP_ASSERT_CS, 1);
@@ -104,10 +110,11 @@ static int fmcs_raw_spi_write(struct fmcs_priv *priv, const u8 *buf, u32 len)
 		ret = an7581_spi_write_bytes(priv, buf, len);
 
 	/* Deassert CS */
+	writel(1, priv->spi_base + REG_SPI_CS_SEL);
 	an7581_spi_op_write(priv, SPI_OP_DEASSERT_CS, 1);
 
-	/* Restore NFI to CS0 (NAND) */
-	writel(0, priv->nfi_base + REG_NFI_CS_SEL);
+	/* Restore CS0 (NAND) */
+	writel(0, priv->spi_base + REG_SPI_CS_SEL);
 
 	/* Restore Auto Mode */
 	writel(0, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
@@ -122,15 +129,21 @@ static int fmcs_raw_spi_read(struct fmcs_priv *priv, const u8 *send_buf, u32 sen
 	int timeout = 10000;
 	int ret;
 
-	if (!priv->spi_base || !priv->nfi_base)
+	if (!priv->spi_base)
 		return -ENODEV;
+
+	/* Clear interrupt, wait for MACMUX ready */
+	writel(0, priv->spi_base + REG_SPI_INT_CLEAR);
+	while (readl(priv->spi_base + REG_SPI_MACMUX_STATUS) && --timeout)
+		cpu_relax();
 
 	/* Enable Manual Mode */
 	writel(9, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
 	writel(1, priv->spi_base + REG_SPI_CTRL_MANUAL_EN);
+	writel(1, priv->spi_base + REG_SPI_CTRL_DUMMY);
 
-	/* Switch NFI to CS1 (FPGA) */
-	writel(1, priv->nfi_base + REG_NFI_CS_SEL);
+	/* Switch to CS1 (FPGA) on SPI controller */
+	writel(1, priv->spi_base + REG_SPI_CS_SEL);
 
 	/* Assert CS (Active Low) */
 	ret = an7581_spi_op_write(priv, SPI_OP_ASSERT_CS, 1);
@@ -141,10 +154,11 @@ static int fmcs_raw_spi_read(struct fmcs_priv *priv, const u8 *send_buf, u32 sen
 		ret = an7581_spi_read_bytes(priv, recv_buf, recv_len);
 
 	/* Deassert CS */
+	writel(1, priv->spi_base + REG_SPI_CS_SEL);
 	an7581_spi_op_write(priv, SPI_OP_DEASSERT_CS, 1);
 
-	/* Restore NFI to CS0 (NAND) */
-	writel(0, priv->nfi_base + REG_NFI_CS_SEL);
+	/* Restore CS0 (NAND) */
+	writel(0, priv->spi_base + REG_SPI_CS_SEL);
 
 	/* Restore Auto Mode */
 	writel(0, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
@@ -182,8 +196,8 @@ int fmcs_spi_read_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
 	if (ret)
 		return ret;
 
-	/* FPGA internal processing delay */
-	udelay(30);
+	/* FPGA internal processing delay (stock: 50us) */
+	udelay(50);
 
 	/* Phase 2: Read 4 bytes of register data with command 0x50 */
 	ret = fmcs_raw_spi_read(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
@@ -221,7 +235,8 @@ int fmcs_spi_read_bosa_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
 	if (ret)
 		return ret;
 
-	udelay(30);
+	/* BOSA controller internal processing delay (stock: 600us) */
+	udelay(600);
 
 	ret = fmcs_raw_spi_read(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
 	if (ret)

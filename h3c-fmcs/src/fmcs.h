@@ -62,7 +62,9 @@ struct fmcs_ploam_msg {
 #define AN7581_NFI_BASE_PHYS      0x1FA11000
 #define AN7581_NFI_SIZE           0x160
 
+#define REG_SPI_INT_CLEAR         0x0004
 #define REG_SPI_MANUAL_OP_CTRL    0x0014
+#define REG_SPI_MACMUX_STATUS     0x0018
 #define REG_SPI_CTRL_MANUAL_EN    0x0020
 #define REG_SPI_OPFIFO_EMPTY      0x0024
 #define REG_SPI_OPFIFO_WDATA      0x0028
@@ -73,9 +75,8 @@ struct fmcs_ploam_msg {
 #define REG_SPI_DFIFO_R_EMPTY     0x003c
 #define REG_SPI_DFIFO_RD          0x0040
 #define REG_SPI_DFIFO_RDATA       0x0044
-
-#define REG_NFI_BUSY              0x0000
-#define REG_NFI_CS_SEL            0x00E4
+#define REG_SPI_CTRL_DUMMY        0x0080
+#define REG_SPI_CS_SEL            0x00E4
 
 #define SPI_OP_DEASSERT_CS        0x00
 #define SPI_OP_ASSERT_CS          0x01
