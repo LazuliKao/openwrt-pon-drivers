@@ -12,6 +12,7 @@
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/firmware.h>
+#include <linux/gpio/consumer.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
@@ -220,14 +221,20 @@ static int fmcs_probe(struct platform_device *pdev)
 	priv->gpiod_clk = devm_gpiod_get_optional(dev, "fpga-clk", GPIOD_OUT_LOW);
 	priv->gpiod_data = devm_gpiod_get_optional(dev, "fpga-data", GPIOD_OUT_LOW);
 
-	priv->irq = platform_get_irq(pdev, 0);
+	if (priv->gpiod_int)
+		priv->irq = gpiod_to_irq(priv->gpiod_int);
+	else
+		priv->irq = platform_get_irq_optional(pdev, 0);
+
 	if (priv->irq > 0) {
 		ret = devm_request_threaded_irq(dev, priv->irq, NULL,
 						fmcs_irq_handler,
-						IRQF_TRIGGER_HIGH | IRQF_ONESHOT,
+						IRQF_TRIGGER_HIGH | IRQF_ONESHOT | IRQF_SHARED,
 						"fmcs-irq", priv);
 		if (ret)
 			dev_warn(dev, "Failed to request IRQ %d: %d\n", priv->irq, ret);
+		else
+			dev_info(dev, "Registered FMCS IRQ %d\n", priv->irq);
 	}
 
 	/* Connect to SPI device if available on spi_bus_type */
