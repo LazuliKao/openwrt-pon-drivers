@@ -15,6 +15,9 @@
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
+#include <linux/device/bus.h>
+#include <linux/wait.h>
+#include <linux/spi/spi.h>
 #include "fmcs.h"
 
 static struct fmcs_priv *g_fmcs_priv;
@@ -192,19 +195,16 @@ static ssize_t reload_fpga_store(struct device *dev, struct device_attribute *at
 }
 static DEVICE_ATTR_WO(reload_fpga);
 
+static int fmcs_match_spi_dev(struct device *dev, const void *data)
+{
+	return 1;
+}
+
 static int fmcs_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *np = dev->of_node;
 	struct fmcs_priv *priv;
-	struct spi_controller *ctlr;
-	struct spi_board_info chip = {
-		.modalias = "fmcs-spi",
-		.max_speed_hz = 25000000,
-		.bus_num = 0,
-		.chip_select = 0,
-		.mode = SPI_MODE_0,
-	};
+	struct device *sdev;
 	int ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
@@ -213,7 +213,7 @@ static int fmcs_probe(struct platform_device *pdev)
 
 	priv->dev = dev;
 	mutex_init(&priv->lock);
-	init_wait_queue_head(&priv->wq);
+	init_waitqueue_head(&priv->wq);
 
 	/* Parse GPIO and Interrupts from Device Tree */
 	priv->gpiod_int = devm_gpiod_get_optional(dev, "fpga-spi-int", GPIOD_IN);
@@ -230,12 +230,13 @@ static int fmcs_probe(struct platform_device *pdev)
 			dev_warn(dev, "Failed to request IRQ %d: %d\n", priv->irq, ret);
 	}
 
-	/* Connect to SPI controller */
-	ctlr = spi_busnum_to_master(0);
-	if (ctlr) {
-		priv->spi = spi_new_device(ctlr, &chip);
-		if (!priv->spi)
-			dev_warn(dev, "Failed to instantiate SPI device\n");
+	/* Connect to SPI device if available on spi_bus_type */
+	sdev = bus_find_device(&spi_bus_type, NULL, NULL, fmcs_match_spi_dev);
+	if (sdev) {
+		priv->spi = to_spi_device(sdev);
+		dev_info(dev, "Connected to SPI device: %s\n", dev_name(sdev));
+	} else {
+		dev_info(dev, "SPI device not bound yet, will attach dynamically\n");
 	}
 
 	/* Register Character Device /dev/fmcs_mci */
@@ -296,7 +297,7 @@ static void fmcs_remove(struct platform_device *pdev)
 	unregister_chrdev_region(priv->devno, 1);
 
 	if (priv->spi)
-		spi_unregister_device(priv->spi);
+		put_device(&priv->spi->dev);
 
 	g_fmcs_priv = NULL;
 }
@@ -319,6 +320,6 @@ static struct platform_driver fmcs_driver = {
 module_platform_driver(fmcs_driver);
 
 MODULE_AUTHOR("Antigravity & OpenWrt Community");
-MODULE_DESCRIPTION("H3C HM2004-DU Micro-OLT FPGA Management Driver (FMCS)");
+MODULE_DESCRIPTION("H3C HM2004-DU Micro-OLT FPGA Management Driver");
 MODULE_LICENSE("GPL");
 MODULE_FIRMWARE("FTTR_TOP.sbit");
