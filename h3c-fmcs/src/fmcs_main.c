@@ -1,24 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * H3C HM2004-DU Micro-OLT FPGA Management Controller (FMCS) Driver
+ * H3C HM2004-DU Micro-OLT FPGA Management Driver (FMCS)
  *
- * Implements /dev/fmcs_mci character control device, SPI communication,
- * and hardware event handling.
+ * Core driver lifecycle, IOCTL interface, FPGA bitstream loading, and IRQ.
  */
 
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
-#include <linux/of.h>
-#include <linux/of_irq.h>
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
-#include <linux/device/bus.h>
 #include <linux/wait.h>
-#include <linux/spi/spi.h>
+#include <linux/io.h>
 #include "fmcs.h"
 
 static struct fmcs_priv *g_fmcs_priv;
@@ -96,19 +92,24 @@ static long fmcs_dev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 		struct fmcs_ploam_msg msg;
 		ret = wait_event_interruptible_timeout(priv->wq, priv->event_pending, msecs_to_jiffies(1000));
 		if (ret > 0 && priv->event_pending) {
-			msg = priv->last_ploam;
+			size_t len = 0;
+			ret = fmcs_spi_recv_ploam(priv, msg.data, &len);
+			msg.len = len;
 			priv->event_pending = false;
-			if (copy_to_user((void __user *)arg, &msg, sizeof(msg)))
+			if (!ret && copy_to_user((void __user *)arg, &msg, sizeof(msg)))
 				ret = -EFAULT;
-			else
-				ret = 0;
 		} else if (ret == 0) {
 			ret = -ETIMEDOUT;
 		}
 		break;
 	}
 	case FMCS_IOC_SEND_PACKET: {
-		/* Test packet injection */
+		struct fmcs_ploam_msg msg;
+		if (copy_from_user(&msg, (void __user *)arg, sizeof(msg))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = fmcs_spi_send_ploam(priv, msg.data, msg.len);
 		break;
 	}
 	default:
@@ -132,10 +133,10 @@ static irqreturn_t fmcs_irq_handler(int irq, void *dev_id)
 	struct fmcs_priv *priv = dev_id;
 	u32 status = 0;
 
-	/* Read FPGA interrupt status */
+	mutex_lock(&priv->lock);
 	fmcs_spi_read_fpga_reg(priv, 0x00000004, &status);
+	mutex_unlock(&priv->lock);
 
-	/* Check LOS / Ranging events */
 	priv->event_pending = true;
 	wake_up_interruptible(&priv->wq);
 
@@ -196,16 +197,10 @@ static ssize_t reload_fpga_store(struct device *dev, struct device_attribute *at
 }
 static DEVICE_ATTR_WO(reload_fpga);
 
-static int fmcs_match_spi_dev(struct device *dev, const void *data)
-{
-	return 1;
-}
-
 static int fmcs_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct fmcs_priv *priv;
-	struct device *sdev;
 	int ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
@@ -215,6 +210,22 @@ static int fmcs_probe(struct platform_device *pdev)
 	priv->dev = dev;
 	mutex_init(&priv->lock);
 	init_waitqueue_head(&priv->wq);
+
+	/* Map AN7581 SNFI/SPI and NFI MMIO Registers */
+	priv->spi_base = ioremap(AN7581_SPI_BASE_PHYS, AN7581_SPI_SIZE);
+	if (!priv->spi_base) {
+		dev_err(dev, "Failed to ioremap SPI controller at 0x%08x\n", AN7581_SPI_BASE_PHYS);
+		return -ENOMEM;
+	}
+
+	priv->nfi_base = ioremap(AN7581_NFI_BASE_PHYS, AN7581_NFI_SIZE);
+	if (!priv->nfi_base) {
+		dev_err(dev, "Failed to ioremap NFI controller at 0x%08x\n", AN7581_NFI_BASE_PHYS);
+		iounmap(priv->spi_base);
+		return -ENOMEM;
+	}
+
+	dev_info(dev, "Mapped AN7581 MMIO: SPI=%px, NFI=%px\n", priv->spi_base, priv->nfi_base);
 
 	/* Parse GPIO and Interrupts from Device Tree */
 	priv->gpiod_int = devm_gpiod_get_optional(dev, "fpga-spi-int", GPIOD_IN);
@@ -237,19 +248,10 @@ static int fmcs_probe(struct platform_device *pdev)
 			dev_info(dev, "Registered FMCS IRQ %d\n", priv->irq);
 	}
 
-	/* Connect to SPI device if available on spi_bus_type */
-	sdev = bus_find_device(&spi_bus_type, NULL, NULL, fmcs_match_spi_dev);
-	if (sdev) {
-		priv->spi = to_spi_device(sdev);
-		dev_info(dev, "Connected to SPI device: %s\n", dev_name(sdev));
-	} else {
-		dev_info(dev, "SPI device not bound yet, will attach dynamically\n");
-	}
-
 	/* Register Character Device /dev/fmcs_mci */
 	ret = alloc_chrdev_region(&priv->devno, 0, 1, FMCS_DEV_NAME);
 	if (ret)
-		return ret;
+		goto err_maps;
 
 	cdev_init(&priv->cdev, &fmcs_fops);
 	priv->cdev.owner = THIS_MODULE;
@@ -286,6 +288,9 @@ err_class:
 	cdev_del(&priv->cdev);
 err_cdev:
 	unregister_chrdev_region(priv->devno, 1);
+err_maps:
+	iounmap(priv->nfi_base);
+	iounmap(priv->spi_base);
 	return ret;
 }
 
@@ -303,8 +308,10 @@ static void fmcs_remove(struct platform_device *pdev)
 	cdev_del(&priv->cdev);
 	unregister_chrdev_region(priv->devno, 1);
 
-	if (priv->spi)
-		put_device(&priv->spi->dev);
+	if (priv->spi_base)
+		iounmap(priv->spi_base);
+	if (priv->nfi_base)
+		iounmap(priv->nfi_base);
 
 	g_fmcs_priv = NULL;
 }

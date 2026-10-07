@@ -10,11 +10,12 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
-#include <linux/spi/spi.h>
+#include <linux/io.h>
 #include <linux/netdevice.h>
 #include <linux/interrupt.h>
 #include <linux/cdev.h>
 #include <linux/wait.h>
+#include <linux/gpio/consumer.h>
 
 #define FMCS_DRV_NAME "h3c-fmcs"
 #define FMCS_DEV_NAME "fmcs_mci"
@@ -51,21 +52,48 @@ struct fmcs_ploam_msg {
 #define FMCS_IOC_READ_BOSA_REG   _IOWR(FMCS_IOC_MAGIC, 3, struct fmcs_bosa_op)
 #define FMCS_IOC_DEV_ATTR_MODIFY _IOW(FMCS_IOC_MAGIC, 4, struct fmcs_attr_op)
 #define FMCS_IOC_RECV_PLOAM      _IOR(FMCS_IOC_MAGIC, 5, struct fmcs_ploam_msg)
-#define FMCS_IOC_SEND_PACKET     _IOW(FMCS_IOC_MAGIC, 6, __u8)
+#define FMCS_IOC_SEND_PACKET     _IOW(FMCS_IOC_MAGIC, 6, struct fmcs_ploam_msg)
+
+/*
+ * AN7581 SNFI / SPI Controller Physical Addresses & Register Map
+ */
+#define AN7581_SPI_BASE_PHYS      0x1FA10000
+#define AN7581_SPI_SIZE           0x140
+#define AN7581_NFI_BASE_PHYS      0x1FA11000
+#define AN7581_NFI_SIZE           0x160
+
+#define REG_SPI_MANUAL_OP_CTRL    0x0014
+#define REG_SPI_CTRL_MANUAL_EN    0x0020
+#define REG_SPI_OPFIFO_EMPTY      0x0024
+#define REG_SPI_OPFIFO_WDATA      0x0028
+#define REG_SPI_OPFIFO_FULL       0x002c
+#define REG_SPI_OPFIFO_WR         0x0030
+#define REG_SPI_DFIFO_W_FULL      0x0034
+#define REG_SPI_DFIFO_WDATA       0x0038
+#define REG_SPI_DFIFO_R_EMPTY     0x003c
+#define REG_SPI_DFIFO_RD          0x0040
+#define REG_SPI_DFIFO_RDATA       0x0044
+
+#define REG_NFI_BUSY              0x0000
+#define REG_NFI_CS_SEL            0x00E4
+
+#define SPI_OP_DEASSERT_CS        0x00
+#define SPI_OP_ASSERT_CS          0x01
+#define SPI_OP_TX_DFIFO           0x08
+#define SPI_OP_RX_DFIFO           0x0C
 
 /*
  * SPI Wire Protocol Commands
  */
-#include <linux/gpio/consumer.h>
-
-#define FMCS_SPI_CMD_WRITE_REG   0xA8
-#define FMCS_SPI_CMD_READ_REQ    0xA0
-#define FMCS_SPI_CMD_READ_RESP   0x50
+#define FMCS_SPI_CMD_WRITE_REG    0xA8
+#define FMCS_SPI_CMD_READ_REQ     0xA0
+#define FMCS_SPI_CMD_READ_RESP    0x50
 
 /* Driver private structure */
 struct fmcs_priv {
 	struct device *dev;
-	struct spi_device *spi;
+	void __iomem *spi_base;
+	void __iomem *nfi_base;
 	int irq;
 	struct gpio_desc *gpiod_int;
 	struct gpio_desc *gpiod_clk;
@@ -92,6 +120,8 @@ int fmcs_spi_write_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 val);
 int fmcs_spi_read_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 *val);
 int fmcs_spi_write_bosa_reg(struct fmcs_priv *priv, u32 addr, u32 val);
 int fmcs_spi_read_bosa_reg(struct fmcs_priv *priv, u32 addr, u32 *val);
+int fmcs_spi_send_ploam(struct fmcs_priv *priv, const u8 *data, size_t len);
+int fmcs_spi_recv_ploam(struct fmcs_priv *priv, u8 *data, size_t *len);
 
 int fmcs_netdevs_init(struct fmcs_priv *priv);
 void fmcs_netdevs_exit(struct fmcs_priv *priv);
