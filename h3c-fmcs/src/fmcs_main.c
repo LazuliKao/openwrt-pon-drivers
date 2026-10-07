@@ -133,10 +133,23 @@ static const struct file_operations fmcs_fops = {
 static irqreturn_t fmcs_irq_handler(int irq, void *dev_id)
 {
 	struct fmcs_priv *priv = dev_id;
-	u32 status = 0;
+	u32 status_b0 = 0;
+	u8 ploam_rx[16] = { 0 };
+	size_t ploam_len = 0;
 
 	mutex_lock(&priv->lock);
-	fmcs_spi_read_fpga_reg(priv, 0x00000004, &status);
+	/* Read FPGA event register 0x000000B0 */
+	fmcs_spi_read_fpga_reg(priv, 0x000000B0, &status_b0);
+
+	/* Bit 0 of 0xB0 indicates an incoming PLOAM frame from an ONU */
+	if (status_b0 & 0x1) {
+		if (fmcs_spi_recv_ploam(priv, ploam_rx, &ploam_len) == 0 && ploam_len > 0) {
+			memcpy(priv->last_ploam.data, ploam_rx, min_t(size_t, ploam_len, 16));
+			priv->last_ploam.len = ploam_len;
+			priv->event_pending = true;
+			fmcs_rx_ploam_frame(priv, ploam_rx, ploam_len);
+		}
+	}
 	mutex_unlock(&priv->lock);
 
 	priv->event_pending = true;

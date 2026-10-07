@@ -27,12 +27,17 @@ static netdev_tx_t fmcs_omci_xmit(struct sk_buff *skb, struct net_device *dev)
 
 static netdev_tx_t fmcs_ploam_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct fmcs_priv *priv = netdev_priv(dev);
+	struct fmcs_priv *priv = *(struct fmcs_priv **)netdev_priv(dev);
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += skb->len;
 
-	(void)priv;
+	if (priv) {
+		mutex_lock(&priv->lock);
+		fmcs_spi_send_ploam(priv, skb->data, skb->len);
+		mutex_unlock(&priv->lock);
+	}
+
 	dev_kfree_skb_any(skb);
 	return NETDEV_TX_OK;
 }

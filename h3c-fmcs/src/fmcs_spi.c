@@ -203,9 +203,33 @@ int fmcs_spi_write_bosa_reg(struct fmcs_priv *priv, u32 addr, u32 val)
 
 int fmcs_spi_read_bosa_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
 {
+	u8 tx_req[5];
+	u8 rx_cmd = FMCS_SPI_CMD_READ_RESP;
+	u8 rx_resp[4] = { 0 };
+	int ret;
+
+	if (!val)
+		return -EINVAL;
+
 	if (addr < 0x10000)
 		addr = 0x06006300 | addr;
-	return fmcs_spi_read_fpga_reg(priv, addr, val);
+
+	tx_req[0] = FMCS_SPI_CMD_READ_REQ;
+	*(__be32 *)&tx_req[1] = cpu_to_be32(addr);
+
+	ret = fmcs_raw_spi_write(priv, tx_req, sizeof(tx_req));
+	if (ret)
+		return ret;
+
+	udelay(30);
+
+	ret = fmcs_raw_spi_read(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
+	if (ret)
+		return ret;
+
+	/* BOSA controller returns 8-bit value in the last byte rx_resp[3] */
+	*val = (u32)rx_resp[3];
+	return 0;
 }
 
 int fmcs_spi_send_ploam(struct fmcs_priv *priv, const u8 *data, size_t len)
