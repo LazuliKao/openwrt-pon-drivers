@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * H3C HM2004-DU Micro-OLT Virtual Network Interfaces (molt_omci & molt_ploam)
+ * H3C HM2004-DU Micro-OLT Virtual Network Interfaces:
+ * - molt_omci: OMCI control channel
+ * - molt_ploam: PLOAM control channel
+ * - fttr1 ~ fttr16: Downstream DSA switch ports (1:1 mapped to ONU 1~16)
  */
 
 #include <linux/netdevice.h>
@@ -8,26 +11,17 @@
 #include <linux/skbuff.h>
 #include "fmcs.h"
 
+struct fmcs_fttr_port_priv {
+	struct fmcs_priv *priv;
+	u32 port_idx; /* 1-based port index: 1..16 */
+};
+
 static netdev_tx_t fmcs_omci_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct fmcs_priv *priv = *(struct fmcs_priv **)netdev_priv(dev);
-	struct net_device *dst_dev;
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += skb->len;
-
-	dst_dev = dev_get_by_name(&init_net, "lan1");
-	if (!dst_dev)
-		dst_dev = dev_get_by_name(&init_net, "eth1");
-
-	if (dst_dev) {
-		struct sk_buff *nskb = skb_copy(skb, GFP_ATOMIC);
-		if (nskb) {
-			nskb->dev = dst_dev;
-			dev_queue_xmit(nskb);
-		}
-		dev_put(dst_dev);
-	}
 
 	(void)priv;
 	dev_kfree_skb_any(skb);
@@ -51,12 +45,47 @@ static netdev_tx_t fmcs_ploam_xmit(struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 }
 
+static netdev_tx_t fmcs_fttr_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	struct fmcs_fttr_port_priv *port_priv = netdev_priv(dev);
+
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += skb->len;
+
+	/*
+	 * In the future / hardware path, packets directed to fttrX are transmitted
+	 * across the HSGMII interconnect into the FPGA with VLAN tag X.
+	 */
+	(void)port_priv;
+	dev_kfree_skb_any(skb);
+	return NETDEV_TX_OK;
+}
+
+static int fmcs_fttr_open(struct net_device *dev)
+{
+	/* Carrier state is maintained externally by ONU O5 link status */
+	return 0;
+}
+
+static int fmcs_fttr_stop(struct net_device *dev)
+{
+	return 0;
+}
+
 static const struct net_device_ops fmcs_omci_ops = {
 	.ndo_start_xmit = fmcs_omci_xmit,
 };
 
 static const struct net_device_ops fmcs_ploam_ops = {
 	.ndo_start_xmit = fmcs_ploam_xmit,
+};
+
+static const struct net_device_ops fmcs_fttr_ops = {
+	.ndo_open       = fmcs_fttr_open,
+	.ndo_stop       = fmcs_fttr_stop,
+	.ndo_start_xmit = fmcs_fttr_xmit,
+	.ndo_set_mac_address = eth_mac_addr,
+	.ndo_validate_addr   = eth_validate_addr,
 };
 
 void fmcs_rx_omci_frame(struct fmcs_priv *priv, const u8 *data, size_t len)
@@ -102,6 +131,8 @@ void fmcs_rx_ploam_frame(struct fmcs_priv *priv, const u8 *data, size_t len)
 int fmcs_netdevs_init(struct fmcs_priv *priv)
 {
 	int ret;
+	int i;
+	u8 base_mac[ETH_ALEN];
 
 	/* Create molt_omci */
 	priv->omci_dev = alloc_netdev(sizeof(struct fmcs_priv *), "molt_omci",
@@ -144,11 +175,81 @@ int fmcs_netdevs_init(struct fmcs_priv *priv)
 		return ret;
 	}
 
+	/* Generate a deterministic base MAC for downstream FTTR switch ports */
+	eth_random_addr(base_mac);
+	/* Ensure locally administered, unicast */
+	base_mac[0] = 0x02;
+	base_mac[1] = 0xFE;
+	base_mac[2] = 0x88;
+	base_mac[3] = 0x75;
+	base_mac[4] = 0x81;
+
+	/* Create downstream DSA-style switch ports fttr1 ~ fttr16 */
+	for (i = 0; i < FMCS_MAX_FTTR_PORTS; i++) {
+		char ifname[IFNAMSIZ];
+		struct net_device *dev;
+		struct fmcs_fttr_port_priv *port_priv;
+
+		snprintf(ifname, sizeof(ifname), "fttr%d", i + 1);
+		dev = alloc_netdev(sizeof(struct fmcs_fttr_port_priv), ifname,
+				   NET_NAME_UNKNOWN, ether_setup);
+		if (!dev) {
+			ret = -ENOMEM;
+			goto err_unreg_fttr;
+		}
+
+		dev->netdev_ops = &fmcs_fttr_ops;
+		port_priv = netdev_priv(dev);
+		port_priv->priv = priv;
+		port_priv->port_idx = i + 1;
+
+		/* Set unique MAC: 02:FE:88:75:81:01 ~ 10 */
+		base_mac[5] = (u8)(i + 1);
+		eth_hw_addr_set(dev, base_mac);
+
+		/* Default carrier is OFF until ONU establishes O5 link */
+		netif_carrier_off(dev);
+
+		ret = register_netdev(dev);
+		if (ret) {
+			free_netdev(dev);
+			goto err_unreg_fttr;
+		}
+
+		priv->fttr_devs[i] = dev;
+	}
+
 	return 0;
+
+err_unreg_fttr:
+	while (--i >= 0) {
+		if (priv->fttr_devs[i]) {
+			unregister_netdev(priv->fttr_devs[i]);
+			free_netdev(priv->fttr_devs[i]);
+			priv->fttr_devs[i] = NULL;
+		}
+	}
+	unregister_netdev(priv->ploam_dev);
+	free_netdev(priv->ploam_dev);
+	priv->ploam_dev = NULL;
+	unregister_netdev(priv->omci_dev);
+	free_netdev(priv->omci_dev);
+	priv->omci_dev = NULL;
+	return ret;
 }
 
 void fmcs_netdevs_exit(struct fmcs_priv *priv)
 {
+	int i;
+
+	for (i = 0; i < FMCS_MAX_FTTR_PORTS; i++) {
+		if (priv->fttr_devs[i]) {
+			unregister_netdev(priv->fttr_devs[i]);
+			free_netdev(priv->fttr_devs[i]);
+			priv->fttr_devs[i] = NULL;
+		}
+	}
+
 	if (priv->ploam_dev) {
 		unregister_netdev(priv->ploam_dev);
 		free_netdev(priv->ploam_dev);

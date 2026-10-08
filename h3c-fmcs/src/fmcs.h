@@ -47,6 +47,11 @@ struct fmcs_ploam_msg {
 	__u32 len;
 };
 
+struct fmcs_carrier_req {
+	__u32 port;
+	__u32 carrier;
+};
+
 #define FMCS_IOC_WRITE_FPGA_REG  _IOW(FMCS_IOC_MAGIC, 0, struct fmcs_reg_op)
 #define FMCS_IOC_READ_FPGA_REG   _IOWR(FMCS_IOC_MAGIC, 1, struct fmcs_reg_op)
 #define FMCS_IOC_WRITE_BOSA_REG  _IOW(FMCS_IOC_MAGIC, 2, struct fmcs_bosa_op)
@@ -54,6 +59,7 @@ struct fmcs_ploam_msg {
 #define FMCS_IOC_DEV_ATTR_MODIFY _IOW(FMCS_IOC_MAGIC, 4, struct fmcs_attr_op)
 #define FMCS_IOC_RECV_PLOAM      _IOR(FMCS_IOC_MAGIC, 5, struct fmcs_ploam_msg)
 #define FMCS_IOC_SEND_PACKET     _IOW(FMCS_IOC_MAGIC, 6, struct fmcs_ploam_msg)
+#define FMCS_IOC_SET_CARRIER     _IOW(FMCS_IOC_MAGIC, 7, struct fmcs_carrier_req)
 
 /*
  * AN7581 SNFI / SPI Controller Physical Addresses & Register Map
@@ -91,6 +97,8 @@ struct fmcs_ploam_msg {
 #define FMCS_SPI_CMD_READ_REQ     0xA0
 #define FMCS_SPI_CMD_READ_RESP    0x50
 
+#define FMCS_MAX_FTTR_PORTS 16
+
 /* Driver private structure */
 struct fmcs_priv {
 	struct device *dev;
@@ -110,6 +118,7 @@ struct fmcs_priv {
 	/* Virtual Net Devices */
 	struct net_device *omci_dev;
 	struct net_device *ploam_dev;
+	struct net_device *fttr_devs[FMCS_MAX_FTTR_PORTS];
 
 	/* Synchronization */
 	struct mutex lock;

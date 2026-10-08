@@ -115,6 +115,27 @@ static long fmcs_dev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 		ret = fmcs_spi_send_ploam(priv, msg.data, msg.len);
 		break;
 	}
+	case FMCS_IOC_SET_CARRIER: {
+		struct fmcs_carrier_req req;
+		if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
+			ret = -EFAULT;
+			break;
+		}
+		if (req.port < 1 || req.port > FMCS_MAX_FTTR_PORTS) {
+			ret = -EINVAL;
+			break;
+		}
+		if (!priv->fttr_devs[req.port - 1]) {
+			ret = -ENODEV;
+			break;
+		}
+		if (req.carrier)
+			netif_carrier_on(priv->fttr_devs[req.port - 1]);
+		else
+			netif_carrier_off(priv->fttr_devs[req.port - 1]);
+		ret = 0;
+		break;
+	}
 	default:
 		ret = -EINVAL;
 		break;
@@ -401,7 +422,7 @@ static struct platform_driver fmcs_driver = {
 
 module_platform_driver(fmcs_driver);
 
-MODULE_AUTHOR("Antigravity & OpenWrt Community");
+MODULE_AUTHOR("LazuliKao");
 MODULE_DESCRIPTION("H3C HM2004-DU Micro-OLT FPGA Management Driver");
 MODULE_LICENSE("GPL");
 MODULE_FIRMWARE("FTTR_TOP.sbit");
