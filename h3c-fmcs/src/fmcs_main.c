@@ -16,6 +16,7 @@
 #include <linux/wait.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/mod_devicetable.h>
 #include "fmcs.h"
 
@@ -212,6 +213,28 @@ static ssize_t reload_fpga_store(struct device *dev, struct device_attribute *at
 }
 static DEVICE_ATTR_WO(reload_fpga);
 
+static int fmcs_match_spi_child(struct device *dev, const void *data)
+{
+	return 1;
+}
+
+static struct spi_controller *fmcs_get_spi_controller(struct device_node *np)
+{
+	struct platform_device *pdev;
+	struct device *child;
+
+	pdev = of_find_device_by_node(np);
+	if (!pdev)
+		return NULL;
+
+	child = device_find_child(&pdev->dev, NULL, fmcs_match_spi_child);
+	platform_device_put(pdev);
+	if (!child)
+		return NULL;
+
+	return container_of(child, struct spi_controller, dev);
+}
+
 static int fmcs_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -260,13 +283,13 @@ static int fmcs_probe(struct platform_device *pdev)
 		if (!spi_node)
 			spi_node = of_find_compatible_node(NULL, NULL, "airoha,en7581-snand");
 		if (spi_node) {
-			priv->spi_ctrl = of_find_spi_controller_by_node(spi_node);
+			priv->spi_ctrl = fmcs_get_spi_controller(spi_node);
 			of_node_put(spi_node);
 			if (priv->spi_ctrl)
 				dev_info(dev, "Bound to SPI controller %s for bus arbitration locking\n",
 					 dev_name(&priv->spi_ctrl->dev));
 			else
-				dev_warn(dev, "SPI controller found in DT but not yet registered\n");
+				dev_warn(dev, "SPI controller found in DT but child device not found\n");
 		}
 	}
 
