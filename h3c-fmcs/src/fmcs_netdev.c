@@ -36,9 +36,7 @@ static netdev_tx_t fmcs_ploam_xmit(struct sk_buff *skb, struct net_device *dev)
 	dev->stats.tx_bytes += skb->len;
 
 	if (priv) {
-		mutex_lock(&priv->lock);
 		fmcs_spi_send_ploam(priv, skb->data, skb->len);
-		mutex_unlock(&priv->lock);
 	}
 
 	dev_kfree_skb_any(skb);
