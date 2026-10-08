@@ -254,6 +254,22 @@ static int fmcs_probe(struct platform_device *pdev)
 		}
 	}
 
+	/* Bind to SPI Controller for hardware bus arbitration locking */
+	{
+		struct device_node *spi_node = of_parse_phandle(dev->of_node, "spi-controller", 0);
+		if (!spi_node)
+			spi_node = of_find_compatible_node(NULL, NULL, "airoha,en7581-snand");
+		if (spi_node) {
+			priv->spi_ctrl = of_find_spi_controller_by_node(spi_node);
+			of_node_put(spi_node);
+			if (priv->spi_ctrl)
+				dev_info(dev, "Bound to SPI controller %s for bus arbitration locking\n",
+					 dev_name(&priv->spi_ctrl->dev));
+			else
+				dev_warn(dev, "SPI controller found in DT but not yet registered\n");
+		}
+	}
+
 	/* Parse GPIO and Interrupts from Device Tree */
 	priv->gpiod_int = devm_gpiod_get_optional(dev, "fpga-spi-int", GPIOD_IN);
 	priv->gpiod_clk = devm_gpiod_get_optional(dev, "fpga-clk", GPIOD_OUT_LOW);
@@ -339,6 +355,8 @@ static void fmcs_remove(struct platform_device *pdev)
 		iounmap(priv->spi_base);
 	if (priv->nfi_base)
 		iounmap(priv->nfi_base);
+	if (priv->spi_ctrl)
+		spi_controller_put(priv->spi_ctrl);
 
 	g_fmcs_priv = NULL;
 }

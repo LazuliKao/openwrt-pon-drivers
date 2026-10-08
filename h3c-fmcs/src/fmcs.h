@@ -16,6 +16,7 @@
 #include <linux/cdev.h>
 #include <linux/wait.h>
 #include <linux/gpio/consumer.h>
+#include <linux/spi/spi.h>
 
 #define FMCS_DRV_NAME "h3c-fmcs"
 #define FMCS_DEV_NAME "fmcs_mci"
@@ -95,6 +96,7 @@ struct fmcs_priv {
 	struct device *dev;
 	void __iomem *spi_base;
 	void __iomem *nfi_base;
+	struct spi_controller *spi_ctrl;
 	int irq;
 	struct gpio_desc *gpiod_int;
 	struct gpio_desc *gpiod_clk;

@@ -83,7 +83,7 @@ static int an7581_spi_read_bytes(struct fmcs_priv *priv, u8 *buf, u32 len)
 	return 0;
 }
 
-static int fmcs_raw_spi_write(struct fmcs_priv *priv, const u8 *buf, u32 len)
+static int fmcs_raw_spi_write_locked(struct fmcs_priv *priv, const u8 *buf, u32 len)
 {
 	int timeout = 10000;
 	int ret;
@@ -95,6 +95,10 @@ static int fmcs_raw_spi_write(struct fmcs_priv *priv, const u8 *buf, u32 len)
 	writel(0, priv->spi_base + REG_SPI_INT_CLEAR);
 	while (readl(priv->spi_base + REG_SPI_MACMUX_STATUS) && --timeout)
 		cpu_relax();
+	if (!timeout) {
+		ret = -ETIMEDOUT;
+		goto out_restore;
+	}
 
 	/* Enable Manual Mode */
 	writel(9, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
@@ -113,18 +117,17 @@ static int fmcs_raw_spi_write(struct fmcs_priv *priv, const u8 *buf, u32 len)
 	writel(1, priv->spi_base + REG_SPI_CS_SEL);
 	an7581_spi_op_write(priv, SPI_OP_DEASSERT_CS, 1);
 
-	/* Restore CS0 (NAND) */
+out_restore:
+	/* Always guarantee CS0 (NAND) and Auto Mode are restored */
 	writel(0, priv->spi_base + REG_SPI_CS_SEL);
-
-	/* Restore Auto Mode */
 	writel(0, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
 	writel(0, priv->spi_base + REG_SPI_CTRL_MANUAL_EN);
 
 	return ret;
 }
 
-static int fmcs_raw_spi_read(struct fmcs_priv *priv, const u8 *send_buf, u32 send_len,
-			     u8 *recv_buf, u32 recv_len)
+static int fmcs_raw_spi_read_locked(struct fmcs_priv *priv, const u8 *send_buf, u32 send_len,
+				    u8 *recv_buf, u32 recv_len)
 {
 	int timeout = 10000;
 	int ret;
@@ -136,6 +139,10 @@ static int fmcs_raw_spi_read(struct fmcs_priv *priv, const u8 *send_buf, u32 sen
 	writel(0, priv->spi_base + REG_SPI_INT_CLEAR);
 	while (readl(priv->spi_base + REG_SPI_MACMUX_STATUS) && --timeout)
 		cpu_relax();
+	if (!timeout) {
+		ret = -ETIMEDOUT;
+		goto out_restore;
+	}
 
 	/* Enable Manual Mode */
 	writel(9, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
@@ -157,10 +164,9 @@ static int fmcs_raw_spi_read(struct fmcs_priv *priv, const u8 *send_buf, u32 sen
 	writel(1, priv->spi_base + REG_SPI_CS_SEL);
 	an7581_spi_op_write(priv, SPI_OP_DEASSERT_CS, 1);
 
-	/* Restore CS0 (NAND) */
+out_restore:
+	/* Always guarantee CS0 (NAND) and Auto Mode are restored */
 	writel(0, priv->spi_base + REG_SPI_CS_SEL);
-
-	/* Restore Auto Mode */
 	writel(0, priv->spi_base + REG_SPI_MANUAL_OP_CTRL);
 	writel(0, priv->spi_base + REG_SPI_CTRL_MANUAL_EN);
 
@@ -172,12 +178,23 @@ int fmcs_spi_write_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 val)
 	u8 tx_buf[9];
 	int ret;
 
+	if (!priv || !priv->spi_base)
+		return -EINVAL;
+
 	tx_buf[0] = FMCS_SPI_CMD_WRITE_REG;
 	*(__be32 *)&tx_buf[1] = cpu_to_be32(addr);
 	*(__be32 *)&tx_buf[5] = cpu_to_be32(val);
 
-	ret = fmcs_raw_spi_write(priv, tx_buf, sizeof(tx_buf));
-	pr_info("fmcs: write_fpga_reg addr=0x%08x val=0x%08x -> ret=%d\n", addr, val, ret);
+	mutex_lock(&priv->lock);
+	if (priv->spi_ctrl)
+		spi_bus_lock(priv->spi_ctrl);
+
+	ret = fmcs_raw_spi_write_locked(priv, tx_buf, sizeof(tx_buf));
+
+	if (priv->spi_ctrl)
+		spi_bus_unlock(priv->spi_ctrl);
+	mutex_unlock(&priv->lock);
+
 	return ret;
 }
 
@@ -186,35 +203,38 @@ int fmcs_spi_read_fpga_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
 	u8 tx_req[5];
 	u8 rx_cmd = FMCS_SPI_CMD_READ_RESP;
 	u8 rx_resp[4] = { 0 };
-	int ret, ret2;
+	int ret;
 
-	if (!val)
+	if (!priv || !priv->spi_base || !val)
 		return -EINVAL;
 
 	/* Phase 1: Send Read Request (0xA0 + addr) */
 	tx_req[0] = FMCS_SPI_CMD_READ_REQ;
 	*(__be32 *)&tx_req[1] = cpu_to_be32(addr);
 
-	ret = fmcs_raw_spi_write(priv, tx_req, sizeof(tx_req));
-	if (ret) {
-		pr_err("fmcs: read_fpga_reg phase1 failed: %d\n", ret);
-		return ret;
-	}
+	mutex_lock(&priv->lock);
+	if (priv->spi_ctrl)
+		spi_bus_lock(priv->spi_ctrl);
+
+	ret = fmcs_raw_spi_write_locked(priv, tx_req, sizeof(tx_req));
+	if (ret)
+		goto out_unlock;
 
 	/* FPGA internal processing delay (stock: 50us) */
 	udelay(50);
 
 	/* Phase 2: Read 4 bytes of register data with command 0x50 */
-	ret2 = fmcs_raw_spi_read(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
-	if (ret2) {
-		pr_err("fmcs: read_fpga_reg phase2 failed: %d\n", ret2);
-		return ret2;
-	}
+	ret = fmcs_raw_spi_read_locked(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
+	if (ret)
+		goto out_unlock;
 
 	*val = be32_to_cpup((__be32 *)rx_resp);
-	pr_info("fmcs: read_fpga_reg addr=0x%08x -> val=0x%08x (raw rx: %02x %02x %02x %02x)\n",
-		addr, *val, rx_resp[0], rx_resp[1], rx_resp[2], rx_resp[3]);
-	return 0;
+
+out_unlock:
+	if (priv->spi_ctrl)
+		spi_bus_unlock(priv->spi_ctrl);
+	mutex_unlock(&priv->lock);
+	return ret;
 }
 
 int fmcs_spi_write_bosa_reg(struct fmcs_priv *priv, u32 addr, u32 val)
@@ -231,7 +251,7 @@ int fmcs_spi_read_bosa_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
 	u8 rx_resp[4] = { 0 };
 	int ret;
 
-	if (!val)
+	if (!priv || !priv->spi_base || !val)
 		return -EINVAL;
 
 	if (addr < 0x10000)
@@ -240,31 +260,54 @@ int fmcs_spi_read_bosa_reg(struct fmcs_priv *priv, u32 addr, u32 *val)
 	tx_req[0] = FMCS_SPI_CMD_READ_REQ;
 	*(__be32 *)&tx_req[1] = cpu_to_be32(addr);
 
-	ret = fmcs_raw_spi_write(priv, tx_req, sizeof(tx_req));
+	mutex_lock(&priv->lock);
+	if (priv->spi_ctrl)
+		spi_bus_lock(priv->spi_ctrl);
+
+	ret = fmcs_raw_spi_write_locked(priv, tx_req, sizeof(tx_req));
 	if (ret)
-		return ret;
+		goto out_unlock;
 
 	/* BOSA controller internal processing delay (stock: 600us) */
 	udelay(600);
 
-	ret = fmcs_raw_spi_read(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
+	ret = fmcs_raw_spi_read_locked(priv, &rx_cmd, 1, rx_resp, sizeof(rx_resp));
 	if (ret)
-		return ret;
+		goto out_unlock;
 
 	/* BOSA controller returns 8-bit value in the last byte rx_resp[3] */
 	*val = (u32)rx_resp[3];
-	return 0;
+
+out_unlock:
+	if (priv->spi_ctrl)
+		spi_bus_unlock(priv->spi_ctrl);
+	mutex_unlock(&priv->lock);
+	return ret;
 }
 
 int fmcs_spi_send_ploam(struct fmcs_priv *priv, const u8 *data, size_t len)
 {
 	u8 buf[18] = { 0 };
+	int ret;
+
+	if (!priv || !priv->spi_base)
+		return -EINVAL;
 
 	if (len > 16)
 		len = 16;
 	buf[0] = 0xAA;
 	memcpy(&buf[1], data, len);
-	return fmcs_raw_spi_write(priv, buf, len + 1);
+
+	mutex_lock(&priv->lock);
+	if (priv->spi_ctrl)
+		spi_bus_lock(priv->spi_ctrl);
+
+	ret = fmcs_raw_spi_write_locked(priv, buf, len + 1);
+
+	if (priv->spi_ctrl)
+		spi_bus_unlock(priv->spi_ctrl);
+	mutex_unlock(&priv->lock);
+	return ret;
 }
 
 int fmcs_spi_recv_ploam(struct fmcs_priv *priv, u8 *data, size_t *len)
@@ -274,18 +317,30 @@ int fmcs_spi_recv_ploam(struct fmcs_priv *priv, u8 *data, size_t *len)
 	u8 rx[13] = { 0 };
 	int ret;
 
-	ret = fmcs_raw_spi_write(priv, req, sizeof(req));
+	if (!priv || !priv->spi_base || !data)
+		return -EINVAL;
+
+	mutex_lock(&priv->lock);
+	if (priv->spi_ctrl)
+		spi_bus_lock(priv->spi_ctrl);
+
+	ret = fmcs_raw_spi_write_locked(priv, req, sizeof(req));
 	if (ret)
-		return ret;
+		goto out_unlock;
 
 	udelay(30);
 
-	ret = fmcs_raw_spi_read(priv, &cmd, 1, rx, sizeof(rx));
+	ret = fmcs_raw_spi_read_locked(priv, &cmd, 1, rx, sizeof(rx));
 	if (ret)
-		return ret;
+		goto out_unlock;
 
 	memcpy(data, rx, sizeof(rx));
 	if (len)
 		*len = sizeof(rx);
-	return 0;
+
+out_unlock:
+	if (priv->spi_ctrl)
+		spi_bus_unlock(priv->spi_ctrl);
+	mutex_unlock(&priv->lock);
+	return ret;
 }
