@@ -44,8 +44,6 @@ static long fmcs_dev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 	if (!priv)
 		return -ENODEV;
 
-	mutex_lock(&priv->lock);
-
 	switch (cmd) {
 	case FMCS_IOC_WRITE_FPGA_REG: {
 		struct fmcs_reg_op op;
@@ -141,7 +139,6 @@ static long fmcs_dev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 		break;
 	}
 
-	mutex_unlock(&priv->lock);
 	return ret;
 }
 
