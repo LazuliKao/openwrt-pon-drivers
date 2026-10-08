@@ -44,7 +44,23 @@ static long fmcs_dev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 	if (!priv)
 		return -ENODEV;
 
+	if (cmd != FMCS_IOC_GET_FPGA_STATUS && cmd != FMCS_IOC_SET_CARRIER) {
+		int st = atomic_read(&priv->fpga_status);
+		if (st == FMCS_FPGA_STATUS_PROGRAMMING)
+			return -EBUSY;
+		if (st == FMCS_FPGA_STATUS_FAILED)
+			return -EIO;
+	}
+
 	switch (cmd) {
+	case FMCS_IOC_GET_FPGA_STATUS: {
+		__u32 st = atomic_read(&priv->fpga_status);
+		if (copy_to_user((void __user *)arg, &st, sizeof(st)))
+			ret = -EFAULT;
+		else
+			ret = 0;
+		break;
+	}
 	case FMCS_IOC_WRITE_FPGA_REG: {
 		struct fmcs_reg_op op;
 		if (copy_from_user(&op, (void __user *)arg, sizeof(op))) {
@@ -186,16 +202,29 @@ static int fmcs_load_fpga_bitstream(struct fmcs_priv *priv, const char *fw_name)
 
 	if (!priv->gpiod_clk || !priv->gpiod_data) {
 		dev_warn(priv->dev, "FPGA programming GPIOs not configured\n");
+		atomic_set(&priv->fpga_status, FMCS_FPGA_STATUS_FAILED);
+		priv->fpga_error = -ENODEV;
 		return -ENODEV;
 	}
+
+	/* Avoid duplicate concurrent programming */
+	if (atomic_cmpxchg(&priv->fpga_status, FMCS_FPGA_STATUS_PROGRAMMING, FMCS_FPGA_STATUS_PROGRAMMING) == FMCS_FPGA_STATUS_PROGRAMMING) {
+		dev_warn(priv->dev, "FPGA bitstream programming already in progress, ignoring duplicate request\n");
+		return -EBUSY;
+	}
+
+	atomic_set(&priv->fpga_status, FMCS_FPGA_STATUS_PROGRAMMING);
+	priv->fpga_error = 0;
 
 	ret = request_firmware(&fw, fw_name, priv->dev);
 	if (ret) {
 		dev_warn(priv->dev, "FPGA bitstream %s not found (%d)\n", fw_name, ret);
+		atomic_set(&priv->fpga_status, FMCS_FPGA_STATUS_FAILED);
+		priv->fpga_error = ret;
 		return ret;
 	}
 
-	dev_info(priv->dev, "Programming FPGA bitstream %s (%zu bytes)...\n", fw_name, fw->size);
+	dev_info(priv->dev, "Programming FPGA bitstream %s (%zu bytes) in background...\n", fw_name, fw->size);
 
 	gpiod_direction_output(priv->gpiod_clk, 0);
 	gpiod_direction_output(priv->gpiod_data, 0);
@@ -214,18 +243,54 @@ static int fmcs_load_fpga_bitstream(struct fmcs_priv *priv, const char *fw_name)
 			cond_resched();
 	}
 
-	dev_info(priv->dev, "FPGA bitstream programmed successfully!\n");
+	atomic_set(&priv->fpga_status, FMCS_FPGA_STATUS_READY);
+	priv->fpga_error = 0;
+	dev_info(priv->dev, "FPGA bitstream programmed successfully! Micro-OLT active.\n");
 	release_firmware(fw);
 	return 0;
 }
+
+static void fmcs_fpga_work_fn(struct work_struct *work)
+{
+	struct fmcs_priv *priv = container_of(work, struct fmcs_priv, fpga_work);
+	fmcs_load_fpga_bitstream(priv, "FTTR_TOP.sbit");
+}
+
+static ssize_t fpga_status_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct fmcs_priv *priv = dev_get_drvdata(dev);
+	int st;
+
+	if (!priv)
+		return sysfs_emit(buf, "unknown\n");
+
+	st = atomic_read(&priv->fpga_status);
+	switch (st) {
+	case FMCS_FPGA_STATUS_PROGRAMMING:
+		return sysfs_emit(buf, "programming\n");
+	case FMCS_FPGA_STATUS_READY:
+		return sysfs_emit(buf, "ready\n");
+	case FMCS_FPGA_STATUS_FAILED:
+		return sysfs_emit(buf, "failed\n");
+	case FMCS_FPGA_STATUS_NOT_STARTED:
+	default:
+		return sysfs_emit(buf, "not_started\n");
+	}
+}
+static DEVICE_ATTR_RO(fpga_status);
 
 static ssize_t reload_fpga_store(struct device *dev, struct device_attribute *attr,
 				  const char *buf, size_t count)
 {
 	struct fmcs_priv *priv = dev_get_drvdata(dev);
 
-	if (priv)
-		fmcs_load_fpga_bitstream(priv, "FTTR_TOP.sbit");
+	if (priv) {
+		if (atomic_read(&priv->fpga_status) == FMCS_FPGA_STATUS_PROGRAMMING) {
+			dev_warn(dev, "FPGA bitstream programming already running\n");
+			return -EBUSY;
+		}
+		schedule_work(&priv->fpga_work);
+	}
 
 	return count;
 }
@@ -356,11 +421,18 @@ static int fmcs_probe(struct platform_device *pdev)
 	if (ret)
 		dev_warn(dev, "Failed to register virtual netdevs: %d\n", ret);
 
-	/* Automatically load FPGA bitstream if available */
-	fmcs_load_fpga_bitstream(priv, "FTTR_TOP.sbit");
+	/* Initialize FPGA async loader and sysfs status */
+	atomic_set(&priv->fpga_status, FMCS_FPGA_STATUS_NOT_STARTED);
+	priv->fpga_error = 0;
+	INIT_WORK(&priv->fpga_work, fmcs_fpga_work_fn);
+	schedule_work(&priv->fpga_work);
+
 	ret = device_create_file(dev, &dev_attr_reload_fpga);
 	if (ret)
 		dev_warn(dev, "Failed to create reload_fpga sysfs attribute: %d\n", ret);
+	ret = device_create_file(dev, &dev_attr_fpga_status);
+	if (ret)
+		dev_warn(dev, "Failed to create fpga_status sysfs attribute: %d\n", ret);
 
 	g_fmcs_priv = priv;
 	platform_set_drvdata(pdev, priv);
@@ -385,6 +457,8 @@ static void fmcs_remove(struct platform_device *pdev)
 	if (!priv)
 		return;
 
+	cancel_work_sync(&priv->fpga_work);
+	device_remove_file(priv->dev, &dev_attr_fpga_status);
 	device_remove_file(priv->dev, &dev_attr_reload_fpga);
 	fmcs_netdevs_exit(priv);
 	device_destroy(priv->class, priv->devno);

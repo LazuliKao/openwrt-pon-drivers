@@ -60,6 +60,14 @@ struct fmcs_carrier_req {
 #define FMCS_IOC_RECV_PLOAM      _IOR(FMCS_IOC_MAGIC, 5, struct fmcs_ploam_msg)
 #define FMCS_IOC_SEND_PACKET     _IOW(FMCS_IOC_MAGIC, 6, struct fmcs_ploam_msg)
 #define FMCS_IOC_SET_CARRIER     _IOW(FMCS_IOC_MAGIC, 7, struct fmcs_carrier_req)
+#define FMCS_IOC_GET_FPGA_STATUS _IOR(FMCS_IOC_MAGIC, 8, __u32)
+
+enum fmcs_fpga_status {
+	FMCS_FPGA_STATUS_NOT_STARTED = 0,
+	FMCS_FPGA_STATUS_PROGRAMMING = 1,
+	FMCS_FPGA_STATUS_READY       = 2,
+	FMCS_FPGA_STATUS_FAILED      = 3,
+};
 
 /*
  * AN7581 SNFI / SPI Controller Physical Addresses & Register Map
@@ -125,6 +133,11 @@ struct fmcs_priv {
 	wait_queue_head_t wq;
 	bool event_pending;
 	struct fmcs_ploam_msg last_ploam;
+
+	/* Asynchronous FPGA Bitstream Loader & Status */
+	struct work_struct fpga_work;
+	atomic_t fpga_status;
+	int fpga_error;
 };
 
 /* Function Prototypes */
